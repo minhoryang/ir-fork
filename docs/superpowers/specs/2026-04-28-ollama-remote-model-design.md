@@ -75,15 +75,13 @@ The new remote form adds one more explicit branch:
 
 4. URL-like Ollama remote value
 
-Resolution order for a set env var becomes:
+Resolution order at the loader entry points becomes:
 
 1. if it matches the Ollama remote syntax, resolve to remote mode
-2. else if it is a file, use local file
-3. else if it is a directory, resolve known model filename within that directory
-4. else if it is a known HF repo ID, use current HF path/download flow
-5. else error
+2. else delegate unchanged to the current local-path / directory / HuggingFace resolution path
+3. else error
 
-The remote syntax check must happen before file/path/HF error reporting so a valid remote value is not rejected as an invalid path.
+The remote syntax check must happen before the existing local/HF resolution path is entered, so a valid remote value is not rejected as an invalid path.
 
 ## Internal design
 
@@ -100,19 +98,21 @@ This source type is internal to the llm layer. Callers outside `src/llm/*` keep 
 
 ### File boundaries
 
-- `src/llm/download.rs`
+- `src/llm/remote.rs` or `src/llm/source.rs`
   - parse and validate the remote env format
-  - return an internal source variant instead of assuming every explicit env value resolves to a local path
-  - keep existing local path and HF behavior unchanged
+  - reconstruct `{ base_url, model_name }` from the URL-like value
+  - expose a small helper used by embedding/combined loaders before they enter the existing local/HF path
+  - keep `src/llm/download.rs` out of scope for this change
 
 - `src/llm/embedding.rs`
   - keep current formatting rules for query/doc text
   - add a remote embedder path using Ollama HTTP
-  - keep public loader shape unchanged
+  - check the remote parser first, then fall through to the existing local/HF loader path unchanged
 
 - `src/llm/combined.rs`
   - keep current public combined loader shape unchanged
   - add a remote combined path using Ollama HTTP
+  - check the remote parser first, then fall through to the existing local/HF loader path unchanged
   - preserve the current expansion parser contract and yes/no reranker contract
 
 - a shared helper module under `src/llm/*` is allowed for:
@@ -257,7 +257,7 @@ Remote mode must not silently:
 
 ## `HF_HUB_OFFLINE=1` behavior
 
-When an env var resolves to remote mode, the HuggingFace path is not entered at all. For those branches:
+When an env var resolves to remote mode, the existing local/HuggingFace path is not entered at all. For those branches:
 
 - no HF lookup
 - no download
