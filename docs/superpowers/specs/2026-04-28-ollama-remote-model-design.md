@@ -140,6 +140,20 @@ Introduce a small internal source representation in `src/llm/*`:
 
 This source type is internal to the llm layer. Callers outside `src/llm/*` keep using the existing loader entry points.
 
+### Narrowest implementation strategy
+
+To keep the diff as small as possible, this change should preserve the public concrete types `Embedder` and `Combined`.
+
+Do not introduce trait-object-based replacement types for them. That would force wider changes across search, indexing, daemon wiring, and tests.
+
+Instead:
+
+- `Embedder` stays the public type
+- `Combined` stays the public type
+- each gets an internal backend enum that selects between local llama-backed behavior and remote Ollama-backed behavior
+
+This keeps call sites unchanged while allowing remote execution to be added behind the existing APIs.
+
 ### File boundaries
 
 - `src/llm/remote.rs` or `src/llm/source.rs`
@@ -158,14 +172,22 @@ This source type is internal to the llm layer. Callers outside `src/llm/*` keep 
   - must not become the home of remote parsing, HTTP calls, or fallback logic
 
 - `src/llm/embedding.rs`
+  - keep `Embedder` as the public concrete type
+  - add an internal backend enum for local vs remote embedding
   - keep current formatting rules for query/doc text
-  - add a remote embedder path using Ollama HTTP
-  - check the remote parser first, then fall through to the existing local/HF loader path unchanged
+  - in `load_default()`, check whether the env value is an HTTP remote value
+  - if remote, return `load_with_ollama_url(...)`
+  - otherwise fall through to the existing local/HF path unchanged
+  - dispatch `embedding_dim`, `embed_query`, and `embed_query_batch` through the internal backend enum
 
 - `src/llm/combined.rs`
+  - keep `Combined` as the public concrete type
+  - add an internal backend enum for local vs remote combined behavior
   - keep current public combined loader shape unchanged
-  - add a remote combined path using Ollama HTTP
-  - check the remote parser first, then fall through to the existing local/HF loader path unchanged
+  - in `try_load_default()`, check whether the env value is an HTTP remote value
+  - if remote, return `load_with_ollama_url(...)`
+  - otherwise fall through to the existing local/HF path unchanged
+  - dispatch `name()`, expansion, and reranking behavior through the internal backend enum
   - preserve the current expansion parser contract and yes/no reranker contract
 
 - a shared helper module under `src/llm/*` is allowed for:
