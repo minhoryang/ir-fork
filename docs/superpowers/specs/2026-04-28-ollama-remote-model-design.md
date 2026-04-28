@@ -109,23 +109,22 @@ For this spec, the new remote/local routing must be explicit at those seams.
 
 ### Required routing change
 
-The routing choke point is `src/llm/download.rs::resolve_env_hf_or_path()`.
+The narrowest routing design is:
 
-That function is used both by:
-
-1. startup preflight through `prepare_model_envs()`
-2. loader entry points such as `Embedder::load_default()` and `Combined::try_load_default()`
-
-So the spec requires the remote-syntax branch to be added there, ahead of the existing file / directory / HuggingFace resolution branches.
+1. a shared remote-parser helper recognizes the URL-like HTTP form
+2. `prepare_model_envs()` uses that helper to treat remote values as valid and skip local/HF validation for those vars
+3. `Embedder::load_default()` and `Combined::try_load_default()` use that same helper first, then call `load_with_ollama_url(...)` directly for remote values
+4. `resolve_env_hf_or_path()` remains the local-only resolver for file / directory / HuggingFace values
 
 That means the routing contract for this change is:
 
 - `src/main.rs` and `src/daemon.rs` stay unchanged and keep calling `llm::download::prepare_model_envs()`
-- `prepare_model_envs()` stays unchanged structurally and benefits automatically once `resolve_env_hf_or_path()` accepts remote syntax
+- `prepare_model_envs()` stays unchanged structurally, but it must skip local/HF validation when a remote value is detected
 - `src/daemon.rs` keeps the existing combined-vs-dedicated tier selection logic
-- `src/llm/embedding.rs` and `src/llm/combined.rs` remain the loader entry points that make the final backend selection for their roles
+- `src/llm/embedding.rs` and `src/llm/combined.rs` remain the loader entry points that make the final remote-vs-local backend decision for their roles
+- `resolve_env_hf_or_path()` continues to resolve only local file, directory, or known HuggingFace values
 
-Without this change in `resolve_env_hf_or_path()`, remote env values would still fail during startup preflight before the loaders ever see them.
+Without the remote-parser check in `prepare_model_envs()`, remote env values would still fail during startup preflight before the loaders ever see them.
 
 ## Internal design
 
@@ -159,11 +158,11 @@ This keeps call sites unchanged while allowing remote execution to be added behi
 - `src/llm/remote.rs` or `src/llm/source.rs`
   - parse and validate the remote env format
   - reconstruct `{ base_url, model_name }` from the URL-like value
-  - expose a small helper used by `resolve_env_hf_or_path()` and remote-capable loaders
+  - expose a small helper used by `prepare_model_envs()` and remote-capable loaders
 
 - `src/llm/download.rs`
-  - extend `resolve_env_hf_or_path()` with a remote-syntax branch
-  - keep `prepare_model_envs()` unchanged structurally so existing preflight call sites continue to work
+  - keep `resolve_env_hf_or_path()` as the local-only file / directory / HuggingFace resolver
+  - update `prepare_model_envs()` to skip local/HF validation when the remote helper matches
   - preserve existing file / directory / HuggingFace behavior for non-remote values
 
 - `src/llm/mod.rs`
@@ -332,7 +331,7 @@ Remote mode must not silently:
 
 ## `HF_HUB_OFFLINE=1` behavior
 
-When an env var resolves to remote mode, the existing local/HuggingFace branch inside `resolve_env_hf_or_path()` is not entered. That makes startup preflight and loader resolution both bypass local/HF handling for those vars. For those branches:
+When an env var resolves to remote mode, startup preflight skips local/HuggingFace validation for that var, and loader resolution does not enter `resolve_env_hf_or_path()` for that var. For those branches:
 
 - no HF lookup
 - no download
