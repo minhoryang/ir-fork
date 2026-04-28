@@ -4,19 +4,19 @@
 
 `ir` currently assumes `IR_*_MODEL` values resolve to local GGUF files, directories, or known HuggingFace repo IDs. That forces in-process `llama_cpp_2` model loading even in environments where the user already runs models behind Ollama and wants `ir` to call HTTP APIs directly.
 
-For this change, the goal is to make that remote path possible with a surgical implementation centered in `src/llm/*`, while preserving current behavior for existing non-remote env values.
+For this change, the goal is to make that remote path possible with a surgical implementation inside `src/llm/*`, while preserving current behavior for existing non-remote env values.
 
 ## Goals
 
 1. Allow a remote Ollama model to be selected through existing `IR_*_MODEL` env vars.
-2. Keep behavior changes concentrated in `src/llm/*`, allowing only thin call-site rewiring where current startup paths hard-wire `download.rs`.
+2. Keep implementation changes inside `src/llm/*`.
 3. Preserve current behavior for file, directory, and HuggingFace repo ID env values.
 4. Make remote mode explicit and fail fast on invalid configuration or bad remote responses.
 5. Ensure remote mode bypasses HuggingFace download and in-process llama loading for the selected role.
 
 ## Non-goals
 
-1. Do not redesign the search pipeline or daemon orchestration; only minimal call-site rewiring outside `src/llm/*` is allowed when required to reach the new llm routing entry points.
+1. Do not redesign the search pipeline, daemon orchestration, or CLI surface outside `src/llm/*`.
 2. Do not add generic provider abstractions for non-Ollama backends.
 3. Do not introduce auth semantics for URL userinfo.
 4. Do not require or promise full remote validation for dedicated expander/reranker mode in this change.
@@ -109,25 +109,27 @@ For this spec, the new remote/local routing must be explicit at those seams.
 
 ### Required routing change
 
-If `download.rs` remains out of scope, the preflight call sites must stop hard-wiring remote-capable env values through `llm::download::prepare_model_envs()`.
+The routing choke point is `src/llm/download.rs::resolve_env_hf_or_path()`.
 
-Instead, the spec requires a new llm-level preflight entry point that:
+That function is used both by:
 
-1. recognizes remote syntax for remote-capable env vars
-2. treats those vars as valid without entering `download.rs`
-3. delegates only non-remote env values to the existing local/HF validation path
+1. startup preflight through `prepare_model_envs()`
+2. loader entry points such as `Embedder::load_default()` and `Combined::try_load_default()`
+
+So the spec requires the remote-syntax branch to be added there, ahead of the existing file / directory / HuggingFace resolution branches.
 
 That means the routing contract for this change is:
 
-- `src/main.rs` and `src/daemon.rs` must call the new llm-level preflight entry point instead of calling `llm::download::prepare_model_envs()` directly for remote-capable vars
+- `src/main.rs` and `src/daemon.rs` stay unchanged and keep calling `llm::download::prepare_model_envs()`
+- `prepare_model_envs()` stays unchanged structurally and benefits automatically once `resolve_env_hf_or_path()` accepts remote syntax
 - `src/daemon.rs` keeps the existing combined-vs-dedicated tier selection logic
-- `src/llm/embedding.rs` and `src/llm/combined.rs` remain the loader entry points that make the final remote-vs-local decision for their roles
+- `src/llm/embedding.rs` and `src/llm/combined.rs` remain the loader entry points that make the final backend selection for their roles
 
-Without this rewiring, remote env values would still hit `download.rs` during startup preflight and fail before the loaders ever see them.
+Without this change in `resolve_env_hf_or_path()`, remote env values would still fail during startup preflight before the loaders ever see them.
 
 ## Internal design
 
-Implementation stays centered in `src/llm/*`, with minimal call-site rewiring in `src/main.rs` and `src/daemon.rs` for preflight entry.
+All implementation changes stay inside `src/llm/*`.
 
 ### New shared source representation
 
@@ -143,12 +145,16 @@ This source type is internal to the llm layer. Callers outside `src/llm/*` keep 
 - `src/llm/remote.rs` or `src/llm/source.rs`
   - parse and validate the remote env format
   - reconstruct `{ base_url, model_name }` from the URL-like value
-  - expose a small helper used by embedding/combined loaders before they enter the existing local/HF path
-  - keep `src/llm/download.rs` out of scope for this change
+  - expose a small helper used by `resolve_env_hf_or_path()` and remote-capable loaders
+
+- `src/llm/download.rs`
+  - extend `resolve_env_hf_or_path()` with a remote-syntax branch
+  - keep `prepare_model_envs()` unchanged structurally so existing preflight call sites continue to work
+  - preserve existing file / directory / HuggingFace behavior for non-remote values
 
 - `src/llm/mod.rs`
   - may add only the minimal module wiring for the new helper module
-  - may expose a tiny shared type or llm-level preflight helper if embedding and combined both need it
+  - may expose a tiny shared type if embedding and combined both need it
   - must not become the home of remote parsing, HTTP calls, or fallback logic
 
 - `src/llm/embedding.rs`
@@ -161,15 +167,6 @@ This source type is internal to the llm layer. Callers outside `src/llm/*` keep 
   - add a remote combined path using Ollama HTTP
   - check the remote parser first, then fall through to the existing local/HF loader path unchanged
   - preserve the current expansion parser contract and yes/no reranker contract
-
-- `src/main.rs`
-  - replace direct preflight dependency on `llm::download::prepare_model_envs()` with the new llm-level preflight entry point
-  - leave embed command flow otherwise unchanged
-
-- `src/daemon.rs`
-  - replace direct preflight dependency on `llm::download::prepare_model_envs()` with the new llm-level preflight entry point
-  - keep existing combined-vs-dedicated tier routing
-  - keep `IR_COMBINED_MODEL` precedence over dedicated tier-2 env vars
 
 - a shared helper module under `src/llm/*` is allowed for:
   - HTTP request/response types
@@ -313,7 +310,7 @@ Remote mode must not silently:
 
 ## `HF_HUB_OFFLINE=1` behavior
 
-When an env var resolves to remote mode, the existing local/HuggingFace path is not entered at all. This includes startup preflight in `main.rs` / `daemon.rs`. For those branches:
+When an env var resolves to remote mode, the existing local/HuggingFace branch inside `resolve_env_hf_or_path()` is not entered. That makes startup preflight and loader resolution both bypass local/HF handling for those vars. For those branches:
 
 - no HF lookup
 - no download
