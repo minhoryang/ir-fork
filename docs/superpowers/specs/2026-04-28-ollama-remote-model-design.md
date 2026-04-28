@@ -104,6 +104,11 @@ This source type is internal to the llm layer. Callers outside `src/llm/*` keep 
   - expose a small helper used by embedding/combined loaders before they enter the existing local/HF path
   - keep `src/llm/download.rs` out of scope for this change
 
+- `src/llm/mod.rs`
+  - may add only the minimal module wiring for the new helper module
+  - may expose a tiny shared type if embedding and combined both need it
+  - must not become the home of remote parsing, HTTP calls, or fallback logic
+
 - `src/llm/embedding.rs`
   - keep current formatting rules for query/doc text
   - add a remote embedder path using Ollama HTTP
@@ -202,7 +207,7 @@ POST {base_url}/api/embed
 Expected request body:
 
 - `model`
-- `input`
+- `input` string, string[]
 
 Expected success response:
 
