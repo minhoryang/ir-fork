@@ -101,9 +101,16 @@ export IR_EXPANDER_MODEL="$HOME/my-models/qmd-query-expansion-1.7B-q4_k_m.gguf"
 export IR_COMBINED_MODEL="$HOME/local-models/Qwen3.5-2B-Q4_K_M.gguf"   # 테스트 / 실험 전용
 ```
 
+**원격 Ollama 모델:**
+
+```bash
+export IR_EMBEDDING_MODEL="http://embeddinggemma:300m@127.0.0.1:11112"
+export IR_COMBINED_MODEL="http://qwen3.5:2b@127.0.0.1:11111"
+```
+
 탐색 순서: 환경변수 → `IR_MODEL_DIRS` → `~/local-models/` → `~/.cache/ir/models/` → `~/.cache/qmd/models/` → HF Hub 자동 다운로드.
 
-`IR_*_MODEL` 환경변수는 `.gguf` 파일 경로, 모델이 포함된 디렉터리 경로, 또는 HuggingFace 레포 ID(`owner/name`)를 허용합니다. 인식되지 않는 값은 기본 모델을 조용히 로드하는 대신 즉시 오류를 출력합니다.
+`IR_*_MODEL` 환경변수는 `.gguf` 파일 경로, 모델이 포함된 디렉터리 경로, HuggingFace 레포 ID(`owner/name`), 또는 `http://model-name@host:port` 형식의 Ollama 원격 값을 허용합니다. 원격 형식에서는 URL userinfo가 인증정보가 아니라 모델 이름으로 해석됩니다. 원격 값은 해당 역할에서 HuggingFace 다운로드와 in-process llama.cpp 로딩을 우회합니다. 인식되지 않는 값은 기본 모델을 조용히 로드하는 대신 즉시 오류를 출력합니다.
 
 **설정 디렉터리:**
 

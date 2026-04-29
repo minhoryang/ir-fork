@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Features
+
+- `IR_EMBEDDING_MODEL` and `IR_COMBINED_MODEL` now accept Ollama remote values in the form
+  `http://model-name@host:port`. These values skip HuggingFace download and use Ollama HTTP
+  endpoints directly for embedding or combined expand+rerank work.
+
 ## [0.13.0] - 2026-04-23
 
 ### Breaking
