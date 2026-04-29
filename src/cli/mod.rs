@@ -142,6 +142,9 @@ pub enum Command {
         /// Serve over HTTP on the given port instead of stdio (e.g. --http 3620)
         #[arg(long)]
         http: Option<u16>,
+        /// Set Access-Control-Allow-Origin for HTTP mode (e.g. --cors '*' or --cors 'https://example.com')
+        #[arg(long)]
+        cors: Option<String>,
     },
 }
 

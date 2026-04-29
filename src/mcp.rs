@@ -430,10 +430,10 @@ fn run_update(collection: Option<&str>, force: bool) -> IrResult<Vec<UpdateResul
 
 // ── entry point ───────────────────────────────────────────────────────────────
 
-pub async fn run(http: Option<u16>) -> IrResult<()> {
+pub async fn run(http: Option<u16>, cors: Option<String>) -> IrResult<()> {
     match http {
         None => run_stdio().await,
-        Some(port) => run_http(port).await,
+        Some(port) => run_http(port, cors).await,
     }
 }
 
@@ -449,7 +449,7 @@ async fn run_stdio() -> IrResult<()> {
     Ok(())
 }
 
-async fn run_http(port: u16) -> IrResult<()> {
+async fn run_http(port: u16, cors: Option<String>) -> IrResult<()> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
@@ -467,6 +467,37 @@ async fn run_http(port: u16) -> IrResult<()> {
     eprintln!("ir MCP server listening on http://{addr}/mcp");
 
     let router = axum::Router::new().nest_service("/mcp", service);
+    let router = if let Some(origin) = cors {
+        use tower_http::cors::{AllowOrigin, CorsLayer};
+        let allow_origin = if origin == "*" {
+            AllowOrigin::any()
+        } else {
+            let header_val = origin
+                .parse::<axum::http::HeaderValue>()
+                .map_err(|e| crate::error::Error::Other(format!("invalid --cors value: {e}")))?;
+            AllowOrigin::exact(header_val)
+        };
+        router.layer(
+            CorsLayer::new()
+                .allow_origin(allow_origin)
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::DELETE,
+                ])
+                .allow_headers([
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderName::from_static("mcp-session-id"),
+                    axum::http::HeaderName::from_static("mcp-protocol-version"),
+                ])
+                .expose_headers([
+                    axum::http::HeaderName::from_static("mcp-session-id"),
+                    axum::http::HeaderName::from_static("mcp-protocol-version"),
+                ]),
+        )
+    } else {
+        router
+    };
     axum::serve(listener, router)
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c().await.ok();
