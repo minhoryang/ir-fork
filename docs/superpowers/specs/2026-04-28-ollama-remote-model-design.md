@@ -18,7 +18,7 @@ For this change, the goal is to make that remote path possible with a surgical i
 
 1. Do not redesign the search pipeline, daemon orchestration, or CLI surface outside `src/llm/*`.
 2. Do not add generic provider abstractions for non-Ollama backends.
-3. Do not introduce auth semantics for URL userinfo.
+3. Do not add compatibility shims or migration behavior for the old `http://model@host:port` form.
 4. Do not require or promise full remote validation for dedicated expander/reranker mode in this change.
 
 ## Scope
@@ -39,29 +39,29 @@ The remote env format may be accepted for these vars by shared parsing logic, bu
 
 ## User-facing env format
 
-Remote mode uses a URL-like convention:
+Remote mode uses an Ollama-specific scheme:
 
 ```bash
-IR_EMBEDDING_MODEL=http://embeddinggemma:300m@127.0.0.1:11112
-IR_COMBINED_MODEL=http://qwen3.5:2b@127.0.0.1:11111
+IR_EMBEDDING_MODEL=ollama://127.0.0.1:11112/embeddinggemma:300m
+IR_COMBINED_MODEL=ollama://127.0.0.1:11111/batiai/qwen3.6-27b:iq4
 ```
 
 Interpretation rules:
 
-- scheme + host + optional port form the Ollama base URL
-- raw userinfo is the model name
-- `username[:password]` is reconstructed back into the model name verbatim
-- userinfo is **not** credentials in this mode
-- percent-encoding is not required
+- `ollama://` marks the value as a remote Ollama model
+- authority (`host[:port]`) becomes the Ollama server address
+- path after the first `/` becomes the model name verbatim
+- the parsed base URL is normalized internally to `http://host[:port]`
+- model names may contain `/` and `:`
 
 Examples:
 
 | Env value | Base URL | Model name |
 |---|---|---|
-| `http://embeddinggemma:300m@127.0.0.1:11112` | `http://127.0.0.1:11112` | `embeddinggemma:300m` |
-| `http://qwen3.5:2b@127.0.0.1:11111` | `http://127.0.0.1:11111` | `qwen3.5:2b` |
+| `ollama://127.0.0.1:11112/embeddinggemma:300m` | `http://127.0.0.1:11112` | `embeddinggemma:300m` |
+| `ollama://localhost:11111/batiai/qwen3.6-27b:iq4` | `http://localhost:11111` | `batiai/qwen3.6-27b:iq4` |
 
-This is a purpose-built URL-like convention for model selection. It must be documented as such so it is not confused with auth support.
+This is a purpose-built scheme for model selection. It is not a general URL transport layer and does not imply HTTPS support in this change.
 
 ## Env resolution rules
 
@@ -73,11 +73,11 @@ Existing accepted forms remain unchanged:
 
 The new remote form adds one more explicit branch:
 
-4. URL-like Ollama remote value
+4. `ollama://host:port/model` remote value
 
 Resolution order at the loader entry points becomes:
 
-1. if it matches the Ollama remote syntax, resolve to remote mode
+1. if it matches the `ollama://` remote syntax, resolve to remote mode
 2. else delegate unchanged to the current local-path / directory / HuggingFace resolution path
 3. else error
 
@@ -111,7 +111,7 @@ For this spec, the new remote/local routing must be explicit at those seams.
 
 The narrowest routing design is:
 
-1. a shared remote-parser helper recognizes the URL-like HTTP form
+1. a shared remote-parser helper recognizes the `ollama://host:port/model` form
 2. `prepare_model_envs()` uses that helper to treat remote values as valid and skip local/HF validation for those vars
 3. `Embedder::load_default()` and `Combined::try_load_default()` use that same helper first, then call `load_with_ollama_url(...)` directly for remote values
 4. `resolve_env_hf_or_path()` remains the local-only resolver for file / directory / HuggingFace values
@@ -157,7 +157,7 @@ This keeps call sites unchanged while allowing remote execution to be added behi
 
 - `src/llm/remote.rs` or `src/llm/source.rs`
   - parse and validate the remote env format
-  - reconstruct `{ base_url, model_name }` from the URL-like value
+  - reconstruct `{ base_url, model_name }` from the `ollama://` value
   - expose a small helper used by `prepare_model_envs()` and remote-capable loaders
 
 - `src/llm/download.rs`
@@ -174,7 +174,7 @@ This keeps call sites unchanged while allowing remote execution to be added behi
   - keep `Embedder` as the public concrete type
   - add an internal backend enum for local vs remote embedding
   - keep current formatting rules for query/doc text
-  - in `load_default()`, check whether the env value is an HTTP remote value
+  - in `load_default()`, check whether the env value is an `ollama://` remote value
   - if remote, return `load_with_ollama_url(...)`
   - otherwise fall through to the existing local/HF path unchanged
   - dispatch `embedding_dim`, `embed_query`, and `embed_query_batch` through the internal backend enum
@@ -183,7 +183,7 @@ This keeps call sites unchanged while allowing remote execution to be added behi
   - keep `Combined` as the public concrete type
   - add an internal backend enum for local vs remote combined behavior
   - keep current public combined loader shape unchanged
-  - in `try_load_default()`, check whether the env value is an HTTP remote value
+  - in `try_load_default()`, check whether the env value is an `ollama://` remote value
   - if remote, return `load_with_ollama_url(...)`
   - otherwise fall through to the existing local/HF path unchanged
   - dispatch `name()`, expansion, and reranking behavior through the internal backend enum
@@ -306,9 +306,8 @@ Remote mode is explicit, so failures must also be explicit.
 
 The llm layer must fail fast with clear `Error::Other(...)` messages for:
 
-- malformed remote env value
+- malformed `ollama://` env value
 - missing scheme, host, or model name
-- unsupported URL shape for remote mode
 - network failure
 - non-success HTTP status
 - invalid JSON response
@@ -356,8 +355,8 @@ Testing should stay inside the existing Rust test suite and focus on `src/llm/*`
 
 ### Required tests
 
-1. env parsing tests for the URL-like remote syntax
-2. tests that reconstruct model names containing `:`
+1. env parsing tests for the `ollama://host:port/model` syntax
+2. tests that reconstruct model names containing `/` and `:`
 3. tests that reject malformed remote values with clear errors
 4. tests that confirm non-remote path/dir/HF values still resolve as before
 5. tests for Ollama embedding response parsing
@@ -384,9 +383,9 @@ Because this is a user-facing feature:
 
 Documentation must cover:
 
-- the new URL-like env format
+- the new `ollama://host:port/model[:tag]` env format
 - examples for embedding and combined mode
-- the fact that userinfo is interpreted as model name, not auth
+- the fact that the path component is interpreted as the model name
 - the fact that remote mode bypasses in-process llama loading for the selected role
 - the fact that remote mode constructs `/api/embed` and `/api/generate` from the base URL internally
 
@@ -395,8 +394,8 @@ Documentation must cover:
 This spec is complete when:
 
 1. existing `IR_*_MODEL` values still behave as before
-2. `IR_EMBEDDING_MODEL` can point to an Ollama-served embedding model using the URL-like syntax
-3. `IR_COMBINED_MODEL` can point to an Ollama-served combined model using the URL-like syntax
+2. `IR_EMBEDDING_MODEL` can point to an Ollama-served embedding model using the `ollama://` syntax
+3. `IR_COMBINED_MODEL` can point to an Ollama-served combined model using the `ollama://` syntax
 4. remote combined mode bypasses dedicated tier-2 activation logic
 5. remote mode never downloads models or initializes llama.cpp for the selected role
 6. failures are explicit and user-readable
