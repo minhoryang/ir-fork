@@ -542,7 +542,7 @@ mod tests {
         unsafe {
             std::env::set_var(
                 "IR_EMBEDDING_MODEL",
-                "http://embeddinggemma:300m@127.0.0.1:11112",
+                "ollama://127.0.0.1:11112/embeddinggemma:300m",
             );
         }
 
@@ -560,7 +560,7 @@ mod tests {
         unsafe {
             std::env::set_var(
                 "IR_TEST_REMOTE_LOCAL_ONLY",
-                "http://embeddinggemma:300m@127.0.0.1:11112",
+                "ollama://127.0.0.1:11112/embeddinggemma:300m",
             );
         }
 
