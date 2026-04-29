@@ -43,7 +43,7 @@ Remote mode uses an Ollama-specific scheme:
 
 ```bash
 IR_EMBEDDING_MODEL=ollama://127.0.0.1:11112/embeddinggemma:300m
-IR_COMBINED_MODEL=ollama://127.0.0.1:11111/batiai/qwen3.6-27b:iq4
+IR_COMBINED_MODEL=ollama://127.0.0.1:11111/qwen3.5:2b
 ```
 
 Interpretation rules:

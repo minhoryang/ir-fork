@@ -443,7 +443,8 @@ impl OllamaEmbedder {
                 "input": input,
             }))
             .map_err(|e| Error::Other(format!("ollama embed request: {e}")))?
-            .into_json()
+            .into_body()
+            .read_json::<serde_json::Value>()
             .map_err(|e| Error::Other(format!("ollama embed decode: {e}")))?;
         let mut emb = parse_embed_response(&response)?;
         l2_normalize(&mut emb);

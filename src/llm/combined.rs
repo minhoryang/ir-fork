@@ -297,7 +297,8 @@ impl OllamaCombined {
         ureq::post(&format!("{}/api/generate", self.remote.base_url))
             .send_json(body)
             .map_err(|e| Error::Other(format!("ollama generate request: {e}")))?
-            .into_json()
+            .into_body()
+            .read_json::<serde_json::Value>()
             .map_err(|e| Error::Other(format!("ollama generate decode: {e}")))
     }
 
@@ -306,6 +307,7 @@ impl OllamaCombined {
             "model": self.remote.model_name,
             "prompt": build_expand_prompt(query),
             "stream": false,
+            "think": false,
         }))?;
         let raw = json["response"]
             .as_str()
