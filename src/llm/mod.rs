@@ -14,6 +14,7 @@ pub mod download;
 pub mod embedding;
 pub mod expander;
 pub mod generate;
+pub mod remote;
 pub mod reranker;
 pub mod scoring;
 
