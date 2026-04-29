@@ -25,6 +25,7 @@
 use crate::config::expand_path;
 use crate::error::Result;
 use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 // ^ ASCII-only, passes through all lindera language filters unchanged (POS = SL/foreign word)
@@ -45,10 +46,10 @@ impl PreprocessHandle {
         let raw_program = parts.next()?;
         let expanded = expand_path(raw_program);
         let program = expanded.as_os_str();
-        let args: Vec<&str> = parts.collect();
+        let args: Vec<PathBuf> = parts.map(|a| expand_path(a)).collect();
 
         match Command::new(program)
-            .args(&args)
+            .args(args.iter().map(|a| a.as_os_str()))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
