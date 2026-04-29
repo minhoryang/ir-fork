@@ -90,7 +90,7 @@ export IR_COMBINED_MODEL="$HOME/local-models/Qwen3.5-2B-Q4_K_M.gguf"   # testing
 
 ```bash
 export IR_EMBEDDING_MODEL="ollama://127.0.0.1:11112/embeddinggemma:300m"
-export IR_COMBINED_MODEL="ollama://127.0.0.1:11111/batiai/qwen3.6-27b:iq4"
+export IR_COMBINED_MODEL="ollama://127.0.0.1:11111/batiai/qwen3.5:0.8b"
 ```
 
 Search order: env → `IR_MODEL_DIRS` → `~/local-models/` → `~/.cache/ir/models/` → `~/.cache/qmd/models/` → HF Hub auto-download.
