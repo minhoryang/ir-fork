@@ -89,13 +89,13 @@ export IR_COMBINED_MODEL="$HOME/local-models/Qwen3.5-2B-Q4_K_M.gguf"   # testing
 **Remote Ollama models:**
 
 ```bash
-export IR_EMBEDDING_MODEL="http://embeddinggemma:300m@127.0.0.1:11112"
-export IR_COMBINED_MODEL="http://qwen3.5:2b@127.0.0.1:11111"
+export IR_EMBEDDING_MODEL="ollama://127.0.0.1:11112/embeddinggemma:300m"
+export IR_COMBINED_MODEL="ollama://127.0.0.1:11111/batiai/qwen3.6-27b:iq4"
 ```
 
 Search order: env → `IR_MODEL_DIRS` → `~/local-models/` → `~/.cache/ir/models/` → `~/.cache/qmd/models/` → HF Hub auto-download.
 
-`IR_*_MODEL` env vars accept a path to a `.gguf` file, a directory containing a known model file, a HuggingFace repo ID (`owner/name`), or an Ollama remote value in the form `http://model-name@host:port`. In the remote form, URL userinfo is interpreted as the model name, not credentials. Remote values bypass HuggingFace download and in-process llama.cpp loading for that role. Unrecognized values error immediately instead of silently loading the default.
+`IR_*_MODEL` env vars accept a path to a `.gguf` file, a directory containing a known model file, a HuggingFace repo ID (`owner/name`), or an Ollama remote value in the form `ollama://host:port/model[:tag]`. In the remote form, the path component is interpreted as the model name. Remote values bypass HuggingFace download and in-process llama.cpp loading for that role. Unrecognized values error immediately instead of silently loading the default.
 
 Known HF repo IDs: `ggml-org/embeddinggemma-300M-GGUF`, `ggml-org/bge-m3-Q8_0-GGUF`, `ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF`, `tobil/qmd-query-expansion-1.7B`, `unsloth/Qwen3.5-0.8B-GGUF`, `unsloth/Qwen3.5-2B-GGUF`.
 
