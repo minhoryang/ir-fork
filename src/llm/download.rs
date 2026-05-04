@@ -190,11 +190,27 @@ pub fn resolve_env_hf_or_path(
 /// from the local cache and starts instantly.
 pub fn prepare_model_envs() -> Result<()> {
     use crate::llm::env;
-    let _ = resolve_env_hf_or_path(env::EMBEDDING_MODEL, &[models::EMBEDDING, models::BGE_M3])?;
-    let _ = resolve_env_hf_or_path(env::RERANKER_MODEL, &[models::RERANKER])?;
-    let _ = resolve_env_hf_or_path(env::EXPANDER_MODEL, &[models::EXPANDER])?;
+
+    fn validate_one(env_vars: &[&str], dir_candidates: &[&str]) -> Result<()> {
+        for key in env_vars {
+            let Some(raw_os) = std::env::var_os(key) else {
+                continue;
+            };
+            let raw = raw_os.to_string_lossy().into_owned();
+            if crate::llm::remote::parse_ollama_env_value(&raw).is_some() {
+                return Ok(());
+            }
+            let _ = resolve_env_hf_or_path(&[*key], dir_candidates)?;
+            return Ok(());
+        }
+        Ok(())
+    }
+
+    validate_one(env::EMBEDDING_MODEL, &[models::EMBEDDING, models::BGE_M3])?;
+    validate_one(env::RERANKER_MODEL, &[models::RERANKER])?;
+    validate_one(env::EXPANDER_MODEL, &[models::EXPANDER])?;
     // IR_COMBINED_MODEL takes priority over deprecated IR_QWEN_MODEL.
-    let _ = resolve_env_hf_or_path(
+    validate_one(
         &[env::COMBINED_MODEL, env::QWEN_MODEL],
         &[models::QWEN35_2B, models::QWEN35_0_8B],
     )?;
@@ -299,8 +315,10 @@ fn create_link(source: &Path, alias: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{as_hf_repo_id, resolve_env_hf_or_path};
+    use super::{as_hf_repo_id, prepare_model_envs, resolve_env_hf_or_path};
     use crate::llm::{hf_repos, models};
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn for_filename_resolves_all_known_models() {
@@ -520,5 +538,33 @@ mod tests {
             err.contains("Accepted forms"),
             "error should list accepted forms: {err}"
         );
+    }
+
+    #[test]
+    fn prepare_model_envs_accepts_remote_embedding_value() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var(
+                "IR_EMBEDDING_MODEL",
+                "ollama://127.0.0.1:11112/embeddinggemma:300m",
+            );
+        }
+        let result = prepare_model_envs();
+        unsafe { std::env::remove_var("IR_EMBEDDING_MODEL") };
+        assert!(result.is_ok(), "remote value should bypass local/HF validation");
+    }
+
+    #[test]
+    fn resolve_env_hf_or_path_stays_local_only_for_remote_like_value() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var(
+                "IR_TEST_REMOTE_LOCAL_ONLY",
+                "ollama://127.0.0.1:11112/embeddinggemma:300m",
+            );
+        }
+        let result = resolve_env_hf_or_path(&["IR_TEST_REMOTE_LOCAL_ONLY"], &[models::EMBEDDING]);
+        unsafe { std::env::remove_var("IR_TEST_REMOTE_LOCAL_ONLY") };
+        assert!(result.is_err(), "local-only resolver must not claim remote values");
     }
 }

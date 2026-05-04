@@ -9,6 +9,7 @@
 //   pooling: cls
 
 use crate::error::{Error, Result};
+use crate::llm::remote::OllamaRemote;
 use crate::llm::{LlamaBackend, l2_normalize, model_load_cpu_params, model_load_params, models};
 use llama_cpp_2::{
     context::LlamaContext,
@@ -67,9 +68,23 @@ impl FromStr for EmbeddingPooling {
     }
 }
 
-pub struct Embedder {
+enum EmbedderBackend {
+    Local(LocalEmbedder),
+    Ollama(OllamaEmbedder),
+}
+
+struct LocalEmbedder {
     backend: &'static LlamaBackend,
     model: LlamaModel,
+}
+
+struct OllamaEmbedder {
+    remote: OllamaRemote,
+    dimensions: usize,
+}
+
+pub struct Embedder {
+    backend: EmbedderBackend,
     profile: EmbeddingProfile,
     pooling_override: Option<EmbeddingPooling>,
 }
@@ -81,6 +96,17 @@ impl Embedder {
     }
 
     pub fn load_default() -> Result<Self> {
+        // Check the first set env key for an ollama:// value before local/HF resolution.
+        for key in crate::llm::env::EMBEDDING_MODEL {
+            if let Some(raw_os) = std::env::var_os(key) {
+                let raw = raw_os.to_string_lossy().into_owned();
+                if let Some(remote) = crate::llm::remote::parse_ollama_env_value(&raw) {
+                    return Self::load_with_ollama_url(remote);
+                }
+                break;
+            }
+        }
+
         let path = match crate::llm::download::resolve_env_hf_or_path(
             crate::llm::env::EMBEDDING_MODEL,
             &[models::EMBEDDING, models::BGE_M3],
@@ -105,6 +131,16 @@ impl Embedder {
         Ok(embedder)
     }
 
+    fn load_with_ollama_url(remote: OllamaRemote) -> Result<Self> {
+        let profile = profile_for_remote_model_name(&remote.model_name);
+        let dimensions = OllamaEmbedder::probe_dimensions(&remote, profile)?;
+        Ok(Self {
+            backend: EmbedderBackend::Ollama(OllamaEmbedder { remote, dimensions }),
+            profile,
+            pooling_override: None,
+        })
+    }
+
     fn load_with_gpu_layers(model_path: &Path, gpu_layers: u32) -> Result<Self> {
         let backend = crate::llm::init_backend()?;
         let params = if gpu_layers == 0 {
@@ -116,15 +152,17 @@ impl Embedder {
             .map_err(|e| Error::Other(format!("load embedding model: {e}")))?;
         let profile = profile_for_model_path(model_path);
         Ok(Self {
-            backend,
-            model,
+            backend: EmbedderBackend::Local(LocalEmbedder { backend, model }),
             profile,
             pooling_override: None,
         })
     }
 
     pub fn embedding_dim(&self) -> usize {
-        usize::try_from(self.model.n_embd()).unwrap_or(0)
+        match &self.backend {
+            EmbedderBackend::Local(local) => usize::try_from(local.model.n_embd()).unwrap_or(0),
+            EmbedderBackend::Ollama(ollama) => ollama.dimensions,
+        }
     }
 
     #[allow(dead_code)] // used by eval binary
@@ -133,7 +171,10 @@ impl Embedder {
     }
 
     pub fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
-        self.embed_single(&self.format_query(query))
+        match &self.backend {
+            EmbedderBackend::Local(_) => self.embed_single(&self.format_query(query)),
+            EmbedderBackend::Ollama(ollama) => ollama.embed(&self.format_query(query)),
+        }
     }
 
     pub fn embed_query_batch(&self, queries: &[String]) -> Result<Vec<Vec<f32>>> {
@@ -148,6 +189,19 @@ impl Embedder {
     ) -> Result<Vec<Vec<f32>>> {
         if queries.is_empty() {
             return Ok(Vec::new());
+        }
+
+        if let EmbedderBackend::Ollama(ollama) = &self.backend {
+            let total = queries.len();
+            return queries
+                .iter()
+                .enumerate()
+                .map(|(i, q)| {
+                    let result = ollama.embed(&self.format_query(q));
+                    on_progress(i + 1, total);
+                    result
+                })
+                .collect();
         }
 
         let n_threads = std::thread::available_parallelism()
@@ -170,12 +224,22 @@ impl Embedder {
 
     #[allow(dead_code)] // used by eval binary
     pub fn embed_doc(&self, title: &str, text: &str) -> Result<Vec<f32>> {
-        self.embed_single(&self.format_doc(title, text))
+        match &self.backend {
+            EmbedderBackend::Local(_) => self.embed_single(&self.format_doc(title, text)),
+            EmbedderBackend::Ollama(ollama) => ollama.embed(&self.format_doc(title, text)),
+        }
     }
 
     pub fn embed_doc_batch(&self, chunks: &[(String, String)]) -> Result<Vec<Vec<f32>>> {
         if chunks.is_empty() {
             return Ok(Vec::new());
+        }
+
+        if let EmbedderBackend::Ollama(ollama) = &self.backend {
+            return chunks
+                .iter()
+                .map(|(title, text)| ollama.embed(&self.format_doc(title, text)))
+                .collect();
         }
 
         let n_threads = std::thread::available_parallelism()
@@ -201,6 +265,15 @@ impl Embedder {
     }
 
     fn new_context(&self, n_threads: i32) -> Result<LlamaContext<'_>> {
+        let local = match &self.backend {
+            EmbedderBackend::Local(local) => local,
+            EmbedderBackend::Ollama(_) => {
+                return Err(Error::Other(
+                    "remote Ollama embedder does not create llama contexts".into(),
+                ));
+            }
+        };
+
         let mut ctx_params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(CONTEXT_SIZE))
             // ! encoder requires n_ubatch >= n_tokens; set equal to ctx so chunks never exceed it
@@ -217,15 +290,25 @@ impl Embedder {
             ctx_params = ctx_params.with_pooling_type(pooling.to_llama());
         }
 
-        self.model
-            .new_context(self.backend, ctx_params)
+        local
+            .model
+            .new_context(local.backend, ctx_params)
             .map_err(|e| Error::Other(format!("embedding context: {e}")))
     }
 
     fn embed_with_context(&self, ctx: &mut LlamaContext<'_>, text: &str) -> Result<Vec<f32>> {
         ctx.clear_kv_cache();
 
-        let tokens = self
+        let local = match &self.backend {
+            EmbedderBackend::Local(local) => local,
+            EmbedderBackend::Ollama(_) => {
+                return Err(Error::Other(
+                    "remote Ollama embedder does not use llama contexts".into(),
+                ));
+            }
+        };
+
+        let tokens = local
             .model
             .str_to_token(text, AddBos::Always)
             .map_err(|e| Error::Other(format!("tokenize: {e}")))?;
@@ -276,6 +359,70 @@ impl Embedder {
                 }
             }
         }
+    }
+}
+
+impl OllamaEmbedder {
+    fn probe_dimensions(remote: &OllamaRemote, profile: EmbeddingProfile) -> Result<usize> {
+        let probe = format_query_for_profile(profile, "dimension probe");
+        Ok(Self::embed_request(remote, &probe)?.len())
+    }
+
+    fn embed(&self, input: &str) -> Result<Vec<f32>> {
+        Self::embed_request(&self.remote, input)
+    }
+
+    fn embed_request(remote: &OllamaRemote, input: &str) -> Result<Vec<f32>> {
+        let response: serde_json::Value =
+            ureq::post(&format!("{}/api/embed", remote.base_url))
+                .send_json(serde_json::json!({
+                    "model": remote.model_name,
+                    "input": input,
+                }))
+                .map_err(|e| Error::Other(format!("ollama embed request: {e}")))?
+                .into_body()
+                .read_json::<serde_json::Value>()
+                .map_err(|e| Error::Other(format!("ollama embed decode: {e}")))?;
+        let mut emb = parse_embed_response(&response)?;
+        l2_normalize(&mut emb);
+        Ok(emb)
+    }
+}
+
+fn parse_embed_response(value: &serde_json::Value) -> Result<Vec<f32>> {
+    let embeddings = value["embeddings"]
+        .as_array()
+        .ok_or_else(|| Error::Other("ollama embed response missing embeddings".into()))?;
+    let first = embeddings
+        .first()
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| Error::Other("ollama embed response missing embedding vector".into()))?;
+    first
+        .iter()
+        .map(|v| {
+            v.as_f64()
+                .map(|f| f as f32)
+                .ok_or_else(|| Error::Other("ollama embed vector contains non-number".into()))
+        })
+        .collect()
+}
+
+fn profile_for_remote_model_name(model_name: &str) -> EmbeddingProfile {
+    let name = model_name.to_ascii_lowercase();
+    if name.contains("embeddinggemma") {
+        EmbeddingProfile::EmbeddingGemma
+    } else if name.contains("bge-m3") {
+        EmbeddingProfile::BgeM3
+    } else {
+        EmbeddingProfile::Generic
+    }
+}
+
+fn format_query_for_profile(profile: EmbeddingProfile, query: &str) -> String {
+    match profile {
+        EmbeddingProfile::EmbeddingGemma => format_query(query),
+        EmbeddingProfile::BgeM3 => bge_format_query(query),
+        EmbeddingProfile::Generic => query.to_string(),
     }
 }
 
@@ -334,6 +481,35 @@ mod tests {
         let f = format_doc("My Doc", "some content here");
         assert!(f.starts_with("title: My Doc | text:"));
         assert!(f.contains("some content here"));
+    }
+
+    #[test]
+    fn remote_profile_for_model_name_uses_embeddinggemma_rules() {
+        assert_eq!(
+            profile_for_remote_model_name("embeddinggemma:300m"),
+            EmbeddingProfile::EmbeddingGemma
+        );
+        assert_eq!(
+            profile_for_remote_model_name("bge-m3:latest"),
+            EmbeddingProfile::BgeM3
+        );
+        assert_eq!(
+            profile_for_remote_model_name("nomic-embed-text:latest"),
+            EmbeddingProfile::Generic
+        );
+    }
+
+    #[test]
+    fn parse_embed_response_extracts_and_normalizes_vector() {
+        let json = serde_json::json!({
+            "model": "embeddinggemma:300m",
+            "embeddings": [[3.0, 4.0]]
+        });
+
+        let emb = parse_embed_response(&json).expect("valid embed response");
+        let mag: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+        // parse_embed_response returns the raw vector; l2_normalize is called after
+        assert!((mag - 5.0).abs() < 1e-5, "raw magnitude should be 5.0, got {mag}");
     }
 
     #[test]

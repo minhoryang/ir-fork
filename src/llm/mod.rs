@@ -15,6 +15,7 @@ pub mod embedding;
 pub mod expander;
 pub mod generate;
 pub mod reranker;
+pub mod remote;
 pub mod scoring;
 
 pub use llama_cpp_2::llama_backend::LlamaBackend;
